@@ -1,2 +1,28 @@
-# Dockerfile for Airflow
+# Dockerfile for Molt Observatory Airflow
+FROM apache/airflow:2.8.0-python3.11
 
+USER root
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+# Copy and install requirements
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Copy Molt Observatory code
+COPY --chown=airflow:root molt-observatory /opt/molt-observatory
+
+# Set Python path to include molt-observatory
+ENV PYTHONPATH="/opt/molt-observatory:${PYTHONPATH}"
+
+# Copy DAGs to Airflow DAGs folder
+RUN mkdir -p /opt/airflow/dags && \
+    ln -sf /opt/molt-observatory/airflow/dags/moltbook_ingest_eval.py /opt/airflow/dags/
+
+WORKDIR /opt/airflow
