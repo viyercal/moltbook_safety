@@ -1,11 +1,16 @@
 # scraper/moltbook_api.py
+"""
+Moltbook API client with pagination, rate limiting, and comprehensive entity fetching.
+API docs: https://www.moltbook.com/skill.md
+"""
 import json
 import time
 import hashlib
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import requests
+
 
 @dataclass
 class ApiResponse:
@@ -15,6 +20,7 @@ class ApiResponse:
     json_body: Any
     headers: Dict[str, str]
     content_type: str
+
 
 class TokenBucket:
     def __init__(self, rate_per_sec: float, burst: int):
@@ -26,16 +32,20 @@ class TokenBucket:
     def take(self, n: int = 1):
         while True:
             now = time.time()
-            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+            self.tokens = min(self.capacity, self.tokens +
+                              (now - self.last) * self.rate)
             self.last = now
             if self.tokens >= n:
                 self.tokens -= n
                 return
             time.sleep(0.05)
 
+
 def stable_hash(obj: Any) -> str:
-    blob = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    blob = json.dumps(obj, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
 
 def _parse_json_lenient(text: str) -> Any:
     """
@@ -46,6 +56,7 @@ def _parse_json_lenient(text: str) -> Any:
     dec = json.JSONDecoder()
     obj, _ = dec.raw_decode(text)
     return obj
+
 
 class MoltbookAPI:
     def __init__(self, base_url: str = "https://www.moltbook.com", user_agent: str = None,
@@ -95,3 +106,165 @@ class MoltbookAPI:
                 headers=dict(resp.headers),
                 content_type=ctype,
             )
+
+    def paginate_all(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        response_key: str = "posts",
+        limit: int = 50,
+        max_pages: int = 100,
+        stop_at_timestamp: Optional[str] = None,
+        stop_at_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Paginate through all results until exhausted or stop condition met.
+
+        Args:
+            path: API endpoint path
+            params: Base query parameters
+            response_key: Key in response containing items (e.g., "posts", "agents")
+            limit: Items per page
+            max_pages: Maximum pages to fetch
+            stop_at_timestamp: Stop when created_at <= this timestamp
+            stop_at_id: Stop when this ID is encountered
+
+        Returns:
+            List of all fetched items
+        """
+        all_items: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+
+        params = dict(params or {})
+        params["limit"] = limit
+
+        for page in range(max_pages):
+            params["offset"] = page * limit
+
+            resp = self.get_json(path, params=params)
+            body = resp.json_body
+
+            # Handle both {"key": [...]} and direct list responses
+            if isinstance(body, dict):
+                items = body.get(response_key, [])
+            elif isinstance(body, list):
+                items = body
+            else:
+                items = []
+
+            if not items:
+                break
+
+            for item in items:
+                item_id = item.get("id")
+
+                # Check stop conditions
+                if stop_at_id and item_id == stop_at_id:
+                    return all_items
+
+                if stop_at_timestamp:
+                    created_at = item.get("created_at")
+                    if created_at and created_at <= stop_at_timestamp:
+                        return all_items
+
+                # Deduplicate
+                if item_id and item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    all_items.append(item)
+
+            # If we got fewer items than limit, we've reached the end
+            if len(items) < limit:
+                break
+
+        return all_items
+
+    # =========================================================================
+    # Entity-specific fetching methods
+    # =========================================================================
+
+    def get_all_posts(
+        self,
+        sort: str = "new",
+        limit: int = 50,
+        max_pages: int = 100,
+        stop_at_timestamp: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch all posts with pagination."""
+        return self.paginate_all(
+            "/api/v1/posts",
+            params={"sort": sort},
+            response_key="posts",
+            limit=limit,
+            max_pages=max_pages,
+            stop_at_timestamp=stop_at_timestamp,
+        )
+
+    def get_post_detail(self, post_id: str) -> ApiResponse:
+        """Fetch a single post with comments."""
+        return self.get_json(f"/api/v1/posts/{post_id}")
+
+    def get_all_agents(
+        self,
+        limit: int = 50,
+        max_pages: int = 100,
+        stop_at_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch all agents with pagination."""
+        return self.paginate_all(
+            "/api/v1/agents/recent",
+            params={},
+            response_key="agents",
+            limit=limit,
+            max_pages=max_pages,
+            stop_at_id=stop_at_id,
+        )
+
+    def get_agent_profile(self, agent_name: str) -> ApiResponse:
+        """Fetch detailed profile for a specific agent."""
+        return self.get_json("/api/v1/agents/profile", params={"name": agent_name})
+
+    def get_all_submolts(
+        self,
+        limit: int = 50,
+        max_pages: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Fetch all submolts with pagination."""
+        return self.paginate_all(
+            "/api/v1/submolts",
+            params={},
+            response_key="submolts",
+            limit=limit,
+            max_pages=max_pages,
+        )
+
+    def get_submolt_detail(self, submolt_name: str) -> ApiResponse:
+        """Fetch detailed info for a specific submolt."""
+        return self.get_json(f"/api/v1/submolts/{submolt_name}")
+
+    def get_submolt_feed(
+        self,
+        submolt_name: str,
+        sort: str = "new",
+        limit: int = 50,
+        max_pages: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Fetch all posts from a specific submolt."""
+        return self.paginate_all(
+            f"/api/v1/submolts/{submolt_name}/feed",
+            params={"sort": sort},
+            response_key="posts",
+            limit=limit,
+            max_pages=max_pages,
+        )
+
+    def search(
+        self,
+        query: str,
+        limit: int = 25,
+    ) -> ApiResponse:
+        """Search posts, agents, and submolts."""
+        return self.get_json("/api/v1/search", params={"q": query, "limit": limit})
+
+    def get_post_comments(self, post_id: str, sort: str = "top") -> ApiResponse:
+        """Fetch comments for a specific post."""
+        return self.get_json(f"/api/v1/posts/{post_id}/comments", params={"sort": sort})
