@@ -270,7 +270,8 @@ class LLMJudgeRunner:
         dimensions: Optional[List[Dict[str, str]]] = None,
     ):
         self.client = client or OpenRouterClient()
-        self.model = model or os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
+        self.repair_model = os.environ.get("REPAIR_MODEL", "google/gemini-2.5-flash-lite")
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
 
         # Retry controls
@@ -358,7 +359,7 @@ class LLMJudgeRunner:
             try:
                 repaired = _repair_to_json(
                     client=self.client,
-                    model=self.model,
+                    model=self.repair_model,
                     raw_text=last_content,
                     dimensions=self.dimensions,
                     max_tokens=max_tokens,
