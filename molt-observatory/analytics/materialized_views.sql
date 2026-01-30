@@ -1,0 +1,2 @@
+-- Materialized views for analytics
+
