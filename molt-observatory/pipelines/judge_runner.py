@@ -1,2 +1,0 @@
-# Judge runner for evaluations
-
