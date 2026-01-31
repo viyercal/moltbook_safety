@@ -26,3 +26,7 @@ Thumbs.db
 
 #env
 .env
+
+# blogpost
+docs-site/*
+docs-site
