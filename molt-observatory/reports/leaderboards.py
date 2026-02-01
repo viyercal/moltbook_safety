@@ -283,6 +283,190 @@ def generate_dimension_distribution_chart(
     return f'<div class="chart-container">{fig.to_html(full_html=False, include_plotlyjs=False)}</div>'
 
 
+def generate_agent_leaderboard(
+    agent_scores: List[Dict[str, Any]],
+    output_path: Path,
+    title: str = "Agent Safety Leaderboard",
+) -> None:
+    """
+    Generate an agent leaderboard HTML file.
+    
+    Args:
+        agent_scores: List of agent score records
+        output_path: Path to write the HTML file
+        title: Report title
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    content_parts = [
+        f'''
+        <header>
+            <h1>🏆 {title}</h1>
+            <p class="subtitle">Agents Ranked by Safety Scores</p>
+        </header>
+        ''',
+    ]
+    
+    # Summary
+    content_parts.append(f'''
+        <section>
+            <h2>Overview</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value">{len(agent_scores)}</div>
+                    <div class="stat-label">Agents Scored</div>
+                </div>
+            </div>
+        </section>
+    ''')
+    
+    # Overall leaderboard
+    sorted_agents = sorted(
+        agent_scores, 
+        key=lambda x: -x.get("overall_mean_score", 0)
+    )
+    
+    rows = []
+    for i, agent in enumerate(sorted_agents[:25]):
+        rows.append(f'''
+            <tr>
+                <td>{i + 1}</td>
+                <td>{agent.get("agent_handle", "Unknown")}</td>
+                <td>{_score_badge(agent.get("overall_mean_score", 0))}</td>
+                <td>{agent.get("posts_evaluated", 0)}</td>
+                <td>{"⚠️" if agent.get("has_high_harm_enablement") else "✓"}</td>
+            </tr>
+        ''')
+    
+    content_parts.append(f'''
+        <section>
+            <h2>Overall Rankings</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Agent</th>
+                        <th>Mean Score</th>
+                        <th>Posts Evaluated</th>
+                        <th>Risk</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(rows)}
+                </tbody>
+            </table>
+        </section>
+    ''')
+    
+    html = _html_template(title=title, content="\n".join(content_parts))
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def generate_dimension_leaderboard(
+    dimension_name: str,
+    post_scores: List[Dict[str, Any]],
+    output_path: Path,
+) -> None:
+    """
+    Generate a dimension-specific leaderboard HTML file.
+    
+    Args:
+        dimension_name: Name of the dimension
+        post_scores: List of post score records for this dimension
+        output_path: Path to write the HTML file
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    dim_label = DIMENSION_LABELS.get(dimension_name, dimension_name.replace("_", " ").title())
+    
+    content_parts = [
+        f'''
+        <header>
+            <h1>📊 {dim_label} Leaderboard</h1>
+            <p class="subtitle">Posts Ranked by {dim_label} Score</p>
+        </header>
+        ''',
+    ]
+    
+    # Sort by score
+    sorted_posts = sorted(post_scores, key=lambda x: -x.get("score", 0))
+    
+    rows = []
+    for i, post in enumerate(sorted_posts[:25]):
+        title = post.get("title", "Untitled") or "Untitled"
+        permalink = post.get("permalink", "")
+        truncated_title = title[:40] + "..." if len(title) > 40 else title
+        
+        # Make title a clickable hyperlink if permalink exists
+        if permalink:
+            title_cell = f'<a href="{permalink}" target="_blank" title="{title}" class="post-link">{truncated_title}</a>'
+        else:
+            title_cell = truncated_title
+        
+        rows.append(f'''
+            <tr>
+                <td>{i + 1}</td>
+                <td>{title_cell}</td>
+                <td>{_score_badge(post.get("score", 0))}</td>
+                <td>{post.get("confidence", 0):.2f}</td>
+                <td>{post.get("author", "Unknown")}</td>
+            </tr>
+        ''')
+    
+    content_parts.append(f'''
+        <section>
+            <h2>Rankings</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Title</th>
+                        <th>Score</th>
+                        <th>Confidence</th>
+                        <th>Author</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(rows)}
+                </tbody>
+            </table>
+        </section>
+    ''')
+    
+    # Add bright link styling for dark background
+    extra_styles = '''
+        .post-link {
+            color: #00e5ff;
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+        
+        .post-link:hover {
+            color: #4ecdc4;
+            text-decoration: underline;
+        }
+        
+        table a {
+            color: #00e5ff;
+            text-decoration: none;
+        }
+        
+        table a:hover {
+            color: #4ecdc4;
+            text-decoration: underline;
+        }
+    '''
+    
+    html = _html_template(title=f"{dim_label} Leaderboard", content="\n".join(content_parts), styles=extra_styles)
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
 def generate_leaderboard_report(
     runs_dir: Optional[Path] = None,
     output_dir: Optional[Path] = None,
