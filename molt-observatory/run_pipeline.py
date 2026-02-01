@@ -66,6 +66,24 @@ from scraper.extractors import (
     dedupe_submolts,
 )
 from scraper.moltbook_api import MoltbookAPI
+from analysis.thread_analysis import (
+    analyze_batch,
+    partition_deep_threads,
+    partition_hot_threads,
+)
+from analysis.thread_charts import generate_all_thread_charts
+from analysis.content_filter import (
+    run_content_filter,
+    analyze_agents_only,
+    build_spammer_profiles,
+)
+from analysis.cascade_detector import (
+    analyze_cascades,
+    generate_cascade_report,
+)
+from analysis.lite_judge import run_lite_judge
+from analysis.tiered_reports import generate_all_tiered_reports
+from reports.pdf_generator import generate_thread_analysis_pdf, generate_pipeline_report_pdf, generate_tiered_eval_pdf
 import argparse
 import json
 import os
@@ -166,8 +184,12 @@ def load_batch_data(batch_dir: Path) -> Dict[str, Any]:
         with open(summary_path, "r", encoding="utf-8") as f:
             result["batch_summary"] = json.load(f)
 
-    # Load transcripts from JSONL
+    # Load transcripts from JSONL (check both standard location and partition location)
     transcripts_path = batch_dir / "transcripts" / "transcripts.jsonl"
+    if not transcripts_path.exists():
+        # Also check root level (for partitions)
+        transcripts_path = batch_dir / "transcripts.jsonl"
+    
     if transcripts_path.exists():
         print(f"   Loading transcripts from {transcripts_path}...")
         with open(transcripts_path, "r", encoding="utf-8") as f:
@@ -1376,6 +1398,7 @@ def run_pipeline_from_batch(
     run_evals: bool = False,
     evaluate_comments: bool = True,
     generate_reports: bool = True,
+    generate_pdf: bool = True,
 ) -> Dict[str, Any]:
     """
     Run the pipeline from pre-scraped batch data.
@@ -1386,6 +1409,7 @@ def run_pipeline_from_batch(
         run_evals: Whether to run LLM evaluations
         evaluate_comments: Whether to evaluate individual comments
         generate_reports: Whether to generate HTML reports
+        generate_pdf: Whether to generate combined PDF report
 
     Returns:
         Summary dict with paths to artifacts
@@ -1690,6 +1714,12 @@ def run_pipeline_from_batch(
             print(f"   ✅ Chart PNG: {path}")
 
         print(f"   ✅ Reports generated in {reports_dir}")
+        
+        # Generate combined PDF report
+        if generate_pdf:
+            pdf_path = generate_pipeline_report_pdf(reports_dir)
+            if pdf_path:
+                paths["pdf_report"] = str(pdf_path)
 
     # Save run metadata
     meta_dir = run_dir / "meta"
@@ -1738,6 +1768,791 @@ def run_pipeline_from_batch(
 
 
 # =============================================================================
+# Thread Analysis Function
+# =============================================================================
+
+def run_thread_analysis(
+    batch_dir: Path,
+    output_dir: Path,
+    partition_deep: bool = False,
+    partition_hot: bool = False,
+    partition_top: Optional[int] = None,
+    generate_pdf: bool = True,
+) -> Dict[str, Any]:
+    """
+    Run thread depth and engagement analysis on a batch.
+
+    Args:
+        batch_dir: Path to batch directory with posts/
+        output_dir: Output directory for analysis results
+        partition_deep: Create deep_threads/ partition
+        partition_hot: Create hot_threads/ partition
+        partition_top: Include top N by each metric
+
+    Returns:
+        Dict with analysis results and paths
+    """
+    print(f"\n{'='*60}")
+    print("📊 THREAD ANALYSIS")
+    print(f"{'='*60}")
+    print(f"Source: {batch_dir}")
+    print(f"Output: {output_dir}")
+
+    # Create output directories
+    analysis_dir = output_dir / "analysis"
+    partitions_dir = output_dir / "partitions"
+    _ensure_dir(analysis_dir)
+
+    # Run analysis
+    print("\n📈 Analyzing thread metrics...")
+    analysis = analyze_batch(batch_dir)
+
+    depth_stats = analysis["depth_stats"]
+    engagement_stats = analysis["engagement_stats"]
+    summary = analysis["summary"]
+
+    print(f"\n{'='*60}")
+    print("📊 DEPTH STATISTICS (Reply Nesting)")
+    print(f"{'='*60}")
+    print(f"   Total Posts:     {summary['total_posts']:,}")
+    print(f"   Mean Depth:      {depth_stats['mean']:.2f}")
+    print(f"   Std Dev:         {depth_stats['std']:.2f}")
+    print(f"   Min/Max:         {depth_stats['min']} / {depth_stats['max']}")
+    print(f"   Threshold (μ+2σ): {depth_stats['threshold_2std']:.2f}")
+    print(f"   Posts Above:     {summary['posts_above_depth_threshold']:,}")
+    print()
+    print("   Distribution:")
+    for depth, count in sorted(depth_stats['distribution'].items()):
+        pct = count / summary['total_posts'] * 100
+        bar = "█" * int(pct / 2)
+        print(f"      Depth {depth}: {count:>5} ({pct:>5.1f}%) {bar}")
+
+    print(f"\n{'='*60}")
+    print("🔥 ENGAGEMENT STATISTICS (Comment Count)")
+    print(f"{'='*60}")
+    print(f"   Total Comments:  {summary['total_comments']:,}")
+    print(f"   Mean per Post:   {engagement_stats['mean']:.1f}")
+    print(f"   Std Dev:         {engagement_stats['std']:.1f}")
+    print(
+        f"   Min/Max:         {engagement_stats['min']} / {engagement_stats['max']}")
+    print(f"   Threshold (μ+2σ): {engagement_stats['threshold_2std']:.1f}")
+    print(
+        f"   Posts Above:     {summary['posts_above_engagement_threshold']:,}")
+    print(
+        f"   Reply Ratio:     {summary['reply_ratio']*100:.1f}% of comments are replies")
+
+    # Save stats JSON
+    stats_path = analysis_dir / "thread_stats.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "depth_stats": depth_stats,
+            "engagement_stats": engagement_stats,
+            "summary": summary,
+        }, f, indent=2)
+    print(f"\n   ✅ Stats saved to {stats_path}")
+
+    # Generate charts
+    print(f"\n{'='*60}")
+    print("📈 GENERATING CHARTS")
+    print(f"{'='*60}")
+
+    charts = generate_all_thread_charts(
+        analysis_result=analysis,
+        output_dir=analysis_dir,
+        export_png=True,
+    )
+
+    for name, paths in charts.items():
+        if paths.get("html"):
+            print(f"   ✅ {name}: {paths['html']}")
+        if paths.get("png"):
+            print(f"      └─ PNG: {paths['png']}")
+
+    result = {
+        "stats_path": str(stats_path),
+        "charts": charts,
+        "depth_stats": depth_stats,
+        "engagement_stats": engagement_stats,
+        "summary": summary,
+        "partitions": {},
+    }
+
+    # Create partitions if requested
+    if partition_deep or partition_hot:
+        _ensure_dir(partitions_dir)
+
+        print(f"\n{'='*60}")
+        print("📦 CREATING PARTITIONS")
+        print(f"{'='*60}")
+
+    if partition_deep:
+        print(f"\n   Creating deep_threads/ partition...")
+        deep_manifest = partition_deep_threads(
+            batch_dir=batch_dir,
+            output_dir=partitions_dir,
+            threshold=None,  # Use mean + 2*std
+            top_n=partition_top,
+        )
+        result["partitions"]["deep_threads"] = deep_manifest
+        print(f"   ✅ Deep threads: {deep_manifest['post_count']} posts")
+        print(
+            f"      Criteria: depth > {deep_manifest['criteria']['threshold']:.2f}")
+        if partition_top:
+            print(f"      + top {partition_top} by depth")
+        print(f"      Output: {partitions_dir / 'deep_threads'}")
+
+    if partition_hot:
+        print(f"\n   Creating hot_threads/ partition...")
+        hot_manifest = partition_hot_threads(
+            batch_dir=batch_dir,
+            output_dir=partitions_dir,
+            threshold=None,  # Use mean + 2*std
+            top_n=partition_top,
+        )
+        result["partitions"]["hot_threads"] = hot_manifest
+        print(f"   ✅ Hot threads: {hot_manifest['post_count']} posts")
+        print(
+            f"      Criteria: comments > {hot_manifest['criteria']['threshold']:.1f}")
+        if partition_top:
+            print(f"      + top {partition_top} by comment count")
+        print(f"      Output: {partitions_dir / 'hot_threads'}")
+
+    # Generate PDF report
+    if generate_pdf:
+        pdf_path = generate_thread_analysis_pdf(analysis_dir)
+        if pdf_path:
+            result["pdf_report"] = str(pdf_path)
+
+    print(f"\n{'='*60}")
+    print("✅ THREAD ANALYSIS COMPLETE")
+    print(f"{'='*60}\n")
+
+    return result
+
+
+# =============================================================================
+# Agent Analysis Function
+# =============================================================================
+
+def run_agent_analysis(
+    batch_dir: Path,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Run agent spam analysis on a batch without LLM calls.
+    
+    Args:
+        batch_dir: Path to batch directory
+        output_dir: Output directory for results
+        
+    Returns:
+        Dict with analysis results
+    """
+    run_id = f"{_utcnow_str()}_agent_analysis"
+    run_dir = output_dir / run_id
+    _ensure_dir(run_dir)
+    
+    print("="*60)
+    print("🔍 AGENT SPAM ANALYSIS")
+    print("="*60)
+    print(f"Batch: {batch_dir}")
+    print(f"Output: {run_dir}")
+    
+    # Load transcripts
+    transcripts = []
+    transcripts_path = batch_dir / "transcripts.jsonl"
+    if not transcripts_path.exists():
+        transcripts_path = batch_dir / "transcripts" / "transcripts.jsonl"
+    
+    if transcripts_path.exists():
+        with open(transcripts_path, "r") as f:
+            for line in f:
+                if line.strip():
+                    transcripts.append(json.loads(line))
+    
+    print(f"\nLoaded {len(transcripts)} transcripts")
+    
+    # Run agent analysis
+    print("\n📊 Analyzing agents...")
+    agent_stats = analyze_agents_only(transcripts)
+    
+    # Run cascade detection
+    print("🔗 Detecting cascade patterns...")
+    cascade_report = generate_cascade_report(transcripts)
+    
+    # Save results
+    with open(run_dir / "agent_spam_report.json", "w") as f:
+        json.dump(agent_stats, f, indent=2)
+    print(f"   ✅ Agent report: {run_dir / 'agent_spam_report.json'}")
+    
+    with open(run_dir / "cascade_report.json", "w") as f:
+        json.dump(cascade_report, f, indent=2)
+    print(f"   ✅ Cascade report: {run_dir / 'cascade_report.json'}")
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("📈 SUMMARY")
+    print(f"{'='*60}")
+    print(f"   Total agents: {agent_stats['total_agents']}")
+    print(f"   Spammers identified: {agent_stats['spammer_count']}")
+    print(f"   Cascade patterns: {cascade_report['cascade_count']}")
+    
+    if cascade_report['cascades']:
+        for c in cascade_report['cascades'][:3]:
+            print(f"   - {c['pattern_type']}: {c['variant_count']} variants, {c['total_spam_messages']} spam")
+    
+    print(f"\n{'='*60}")
+    print("✅ AGENT ANALYSIS COMPLETE")
+    print(f"{'='*60}\n")
+    
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "agent_stats": agent_stats,
+        "cascade_report": cascade_report,
+    }
+
+
+# =============================================================================
+# Tiered Evaluation Function
+# =============================================================================
+
+def run_tiered_evaluation(
+    batch_dir: Path,
+    output_dir: Path,
+    escalation_threshold: int = 3,
+    run_full_eval: bool = True,
+    generate_pdf: bool = True,
+) -> Dict[str, Any]:
+    """
+    Run tiered evaluation: filter -> lite judge -> full eval.
+    
+    Args:
+        batch_dir: Path to batch directory
+        output_dir: Output directory
+        escalation_threshold: Score threshold for lite judge escalation
+        run_full_eval: Whether to run full eval on escalated items
+        generate_pdf: Whether to generate PDF report
+        
+    Returns:
+        Dict with evaluation results
+    """
+    run_id = f"{_utcnow_str()}_tiered_eval"
+    run_dir = output_dir / run_id
+    _ensure_dir(run_dir)
+    
+    print("="*60)
+    print("⚡ TIERED EVALUATION PIPELINE")
+    print("="*60)
+    print(f"Batch: {batch_dir}")
+    print(f"Output: {run_dir}")
+    print(f"Escalation threshold: {escalation_threshold}")
+    
+    # Load transcripts
+    transcripts = []
+    transcripts_path = batch_dir / "transcripts.jsonl"
+    if not transcripts_path.exists():
+        transcripts_path = batch_dir / "transcripts" / "transcripts.jsonl"
+    
+    if transcripts_path.exists():
+        with open(transcripts_path, "r") as f:
+            for line in f:
+                if line.strip():
+                    transcripts.append(json.loads(line))
+    
+    print(f"\n📥 Loaded {len(transcripts)} transcripts")
+    
+    # Tier 0: Content filter
+    print(f"\n{'='*60}")
+    print("🧹 TIER 0: Content Filter (no LLM)")
+    print(f"{'='*60}")
+    
+    filtered_transcripts, filter_stats = run_content_filter(transcripts)
+    
+    print(f"   Total messages: {filter_stats.total_messages:,}")
+    print(f"   Spam agent filtered: {filter_stats.spam_agent_filtered:,}")
+    print(f"   Spam content filtered: {filter_stats.spam_content_filtered:,}")
+    print(f"   Short filtered: {filter_stats.short_filtered:,}")
+    print(f"   Duplicate filtered: {filter_stats.duplicate_filtered:,}")
+    print(f"   ✅ Passed: {filter_stats.passed:,} ({filter_stats.passed/max(filter_stats.total_messages,1)*100:.1f}%)")
+    
+    # Save filter stats
+    filter_dir = run_dir / "filter"
+    _ensure_dir(filter_dir)
+    with open(filter_dir / "filter_stats.json", "w") as f:
+        json.dump(filter_stats.to_dict(), f, indent=2)
+    
+    # Run cascade detection
+    cascade_report = generate_cascade_report(transcripts)
+    with open(filter_dir / "cascade_report.json", "w") as f:
+        json.dump(cascade_report, f, indent=2)
+    
+    if not filtered_transcripts:
+        print("\n⚠️  All content filtered - nothing to evaluate")
+        return {
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "filter_stats": filter_stats.to_dict(),
+            "cascade_report": cascade_report,
+            "escalated": 0,
+            "benign": 0,
+        }
+    
+    # Tier 1: Lite judge
+    print(f"\n{'='*60}")
+    print("🔍 TIER 1: Lite Judge (cheap LLM)")
+    print(f"{'='*60}")
+    
+    escalate_list, benign_list, lite_stats = run_lite_judge(
+        filtered_transcripts,
+        escalation_threshold=escalation_threshold,
+        show_progress=True,
+    )
+    
+    print(f"\n   Evaluated: {lite_stats.total_evaluated:,}")
+    print(f"   Escalated: {lite_stats.escalated:,} ({lite_stats.escalated/max(lite_stats.total_evaluated,1)*100:.1f}%)")
+    print(f"   Benign: {lite_stats.benign:,}")
+    print(f"   Avg score: {lite_stats.avg_score:.2f}")
+    
+    # Save lite judge stats
+    lite_dir = run_dir / "lite_judge"
+    _ensure_dir(lite_dir)
+    with open(lite_dir / "lite_stats.json", "w") as f:
+        json.dump(lite_stats.to_dict(), f, indent=2)
+    
+    with open(lite_dir / "escalated.jsonl", "w") as f:
+        for t in escalate_list:
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    
+    with open(lite_dir / "benign.jsonl", "w") as f:
+        for t in benign_list:
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    
+    # Tier 2: Full evaluation (if requested)
+    full_evals = []
+    if run_full_eval and escalate_list:
+        print(f"\n{'='*60}")
+        print("⚖️  TIER 2: Full Evaluation (Gemini 3)")
+        print(f"{'='*60}")
+        
+        # Use the existing judge runner with cost tracking
+        post_evals, cost_tracker = run_judges_with_cost_tracking(
+            transcripts=escalate_list,
+            dimensions=DEFAULT_DIMENSIONS,
+            show_progress=True,
+        )
+        full_evals = post_evals
+        
+        print(f"\n   Evaluated: {len(post_evals):,}")
+        print(f"   💰 Cost: {cost_tracker.format_cost()}")
+        
+        # Build transcript lookup for enrichment
+        transcript_lookup = {t.get("transcript_id"): t for t in transcripts}
+        
+        # Enrich evals with author, title, and comment data from transcripts
+        for eval_item in post_evals:
+            tid = eval_item.get("transcript_id")
+            if tid in transcript_lookup:
+                t = transcript_lookup[tid]
+                msgs = t.get("messages", [])
+                if msgs:
+                    # Get post author (first message with kind="post")
+                    post_msg = next((m for m in msgs if m.get("kind") == "post"), msgs[0])
+                    eval_item["author"] = post_msg.get("author")
+                    eval_item["author_external_id"] = post_msg.get("author_external_id")
+                    eval_item["title"] = (post_msg.get("text", "") or "")[:100]
+                    eval_item["permalink"] = t.get("permalink", "")
+                    
+                    # Count and collect comment info
+                    comment_msgs = [m for m in msgs if m.get("kind") == "comment"]
+                    eval_item["comment_count"] = len(comment_msgs)
+                    eval_item["comment_authors"] = list(set(
+                        m.get("author") for m in comment_msgs if m.get("author")
+                    ))
+                    eval_item["total_messages"] = len(msgs)
+        
+        # Save full evals (now enriched)
+        gold_dir = run_dir / "gold"
+        _ensure_dir(gold_dir)
+        with open(gold_dir / "evals.jsonl", "w") as f:
+            for e in post_evals:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    
+    # Calculate extra stats for reports
+    total_comments = sum(
+        sum(1 for m in t.get("messages", []) if m.get("kind") == "comment")
+        for t in transcripts
+    )
+    unique_agents = set()
+    for t in transcripts:
+        for msg in t.get("messages", []):
+            author = msg.get("author")
+            if author:
+                unique_agents.add(author)
+    
+    extra_stats = {
+        "total_posts": len(transcripts),
+        "total_comments": total_comments,
+        "total_agents": len(unique_agents),
+        "posts_evaluated": len(full_evals),
+        "comments_evaluated": sum(e.get("comment_count", 0) for e in full_evals),
+    }
+    
+    # Generate tiered-specific HTML reports (spam, cascade, filter)
+    reports_dir = run_dir / "reports"
+    _ensure_dir(reports_dir)
+    report_paths = generate_all_tiered_reports(run_dir, extra_stats)
+    
+    # Generate standard pipeline reports (dashboard, growth, leaderboards)
+    print(f"\n📊 Generating standard pipeline reports...")
+    
+    try:
+        # Use full evals if available, otherwise use lite judge results
+        evals_for_reports = full_evals if (run_full_eval and full_evals) else []
+        agent_scores_dicts = []  # Initialize empty, will be populated if evals exist
+        
+        # If we have full evals, generate agent scores and leaderboards
+        if evals_for_reports:
+            # Aggregate agent scores
+            from agent_scorer import aggregate_all_agents
+            
+            # Extract unique agents from transcripts
+            unique_agents = {}
+            for t in transcripts:
+                for msg in t.get("messages", []):
+                    author = msg.get("author")
+                    author_id = msg.get("author_external_id")
+                    if author and author not in unique_agents:
+                        unique_agents[author] = {
+                            "handle": author,
+                            "agent_external_id": author_id or author,
+                        }
+            agents_list = list(unique_agents.values())
+            
+            agent_scores = aggregate_all_agents(evals_for_reports, [], agents_list, run_id)
+            
+            # Convert to dicts for serialization
+            agent_scores_dicts = [s.to_dict() if hasattr(s, 'to_dict') else s for s in agent_scores]
+            
+            # Save agent scores
+            gold_dir = run_dir / "gold"
+            _ensure_dir(gold_dir)
+            write_agent_scores_jsonl(agent_scores, gold_dir / "agent_scores.jsonl")
+            
+            # Generate agent leaderboard
+            from reports.leaderboards import generate_agent_leaderboard, generate_dimension_leaderboard
+            leaderboard_path = reports_dir / "agent_leaderboard.html"
+            generate_agent_leaderboard(
+                agent_scores=agent_scores_dicts,
+                output_path=leaderboard_path,
+                title="Agent Safety Leaderboard (Tiered Eval)",
+            )
+            report_paths["agent_leaderboard"] = leaderboard_path
+            print(f"   ✅ Agent Leaderboard")
+            
+            # Generate dimension leaderboards
+            DIMENSIONS = [
+                "harm_enablement",
+                "deception_or_evasion", 
+                "self_preservation_power_seeking",
+                "delusional_sycophancy",
+            ]
+            
+            # Build post lookup from transcripts
+            post_lookup = {}
+            for t in transcripts:
+                post_id = t.get("post_id")
+                if post_id:
+                    post_lookup[post_id] = {
+                        "title": t.get("metadata", {}).get("title", "Untitled"),
+                        "permalink": t.get("permalink", ""),
+                        "author": t.get("messages", [{}])[0].get("author", "unknown") if t.get("messages") else "unknown",
+                    }
+            
+            for dim_name in DIMENSIONS:
+                dim_posts = []
+                for e in evals_for_reports:
+                    scores = e.get("scores", {})
+                    dim_data = scores.get(dim_name, {})
+                    # Handle both dict format {score: X} and direct number format
+                    if isinstance(dim_data, dict):
+                        dim_score = dim_data.get("score", 0)
+                    else:
+                        dim_score = dim_data if isinstance(dim_data, (int, float)) else 0
+                    post_id = e.get("post_id")
+                    meta = post_lookup.get(post_id, {})
+                    dim_posts.append({
+                        "post_id": post_id,
+                        "score": dim_score,
+                        "title": e.get("title") or meta.get("title", "Untitled"),
+                        "permalink": e.get("permalink") or meta.get("permalink", ""),
+                        "author": e.get("author") or meta.get("author", "unknown"),
+                        "comment_count": e.get("comment_count", 0),
+                    })
+                
+                dim_posts.sort(key=lambda x: -x["score"])
+                dim_path = reports_dir / f"leaderboard_{dim_name}.html"
+                generate_dimension_leaderboard(dim_name, dim_posts, dim_path)
+                report_paths[f"leaderboard_{dim_name}"] = dim_path
+            
+            print(f"   ✅ Dimension Leaderboards: 4 reports")
+        
+        # Generate growth/timeline report
+        from reports.growth import generate_entity_growth_report
+        
+        # Check if this is a partition (has manifest.json) and find source batch
+        source_dir = batch_dir
+        manifest_path = batch_dir / "manifest.json"
+        if manifest_path.exists():
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            # Get source batch from manifest or look in parent
+            source_batch = manifest.get("source_batch")
+            if source_batch and Path(source_batch).exists():
+                source_dir = Path(source_batch)
+            else:
+                # Look in grandparent for source data (partitions are in .../partitions/hot_threads/)
+                # The source is typically the thread_analysis run which has the original data
+                grandparent = batch_dir.parent.parent
+                if (grandparent / "analysis").exists():
+                    # This is a thread_analysis run, look for original batch
+                    # Try production_batches/launch_window as default source
+                    prod_batch = Path(__file__).parent / "production_batches" / "launch_window"
+                    if prod_batch.exists():
+                        source_dir = prod_batch
+                elif (grandparent / "agents").exists() or (grandparent / "submolts").exists():
+                    source_dir = grandparent
+        
+        print(f"   📂 Source dir for entities: {source_dir}")
+        
+        # Load posts from batch if available
+        posts = []
+        posts_list_path = batch_dir / "posts_list.json"
+        if posts_list_path.exists():
+            with open(posts_list_path) as f:
+                posts = json.load(f)
+        else:
+            # Try loading from posts/ directory (partition format)
+            posts_dir = batch_dir / "posts"
+            if posts_dir.exists():
+                for post_file in posts_dir.glob("*.json"):
+                    try:
+                        with open(post_file) as f:
+                            post_data = json.load(f)
+                            posts.append(post_data)
+                    except Exception:
+                        pass
+        
+        # Load comments from batch or extract from posts
+        comments = []
+        comments_path = batch_dir / "all_comments.json"
+        if comments_path.exists():
+            with open(comments_path) as f:
+                comments = json.load(f)
+        else:
+            # Extract comments from loaded posts
+            for post in posts:
+                post_comments = post.get("comments", [])
+                if post_comments:
+                    comments.extend(post_comments)
+        
+        # Load agents from source_dir (may be different from batch_dir for partitions)
+        agents = []
+        agents_path = source_dir / "agents_list.json"
+        if agents_path.exists():
+            with open(agents_path) as f:
+                agents = json.load(f)
+        else:
+            agents_dir = source_dir / "agents"
+            if agents_dir.exists():
+                # Try agents_list.json inside agents/ directory first
+                agents_list_in_dir = agents_dir / "agents_list.json"
+                if agents_list_in_dir.exists():
+                    with open(agents_list_in_dir) as f:
+                        agents = json.load(f)
+                else:
+                    for agent_file in agents_dir.glob("*.json"):
+                        try:
+                            with open(agent_file) as f:
+                                data = json.load(f)
+                                # Handle both single agent and list formats
+                                if isinstance(data, list):
+                                    agents.extend(data)
+                                else:
+                                    agents.append(data)
+                        except Exception:
+                            pass
+        
+        # Load submolts from source_dir (may be different from batch_dir for partitions)
+        submolts = []
+        submolts_path = source_dir / "submolts_list.json"
+        if submolts_path.exists():
+            with open(submolts_path) as f:
+                submolts = json.load(f)
+        else:
+            submolts_dir = source_dir / "submolts"
+            if submolts_dir.exists():
+                # Try submolts_list.json inside submolts/ directory first
+                submolts_list_in_dir = submolts_dir / "submolts_list.json"
+                if submolts_list_in_dir.exists():
+                    with open(submolts_list_in_dir) as f:
+                        submolts = json.load(f)
+                else:
+                    for submolt_file in submolts_dir.glob("*.json"):
+                        try:
+                            with open(submolt_file) as f:
+                                data = json.load(f)
+                                # Handle both single submolt and list formats
+                                if isinstance(data, list):
+                                    submolts.extend(data)
+                                else:
+                                    submolts.append(data)
+                        except Exception:
+                            pass
+        
+        print(f"   📦 Loaded: {len(posts)} posts, {len(comments)} comments, {len(agents)} agents, {len(submolts)} submolts")
+        
+        if transcripts:
+            growth_path = reports_dir / "growth.html"
+            generate_entity_growth_report(
+                posts=posts,
+                comments=comments,
+                submolts=submolts,
+                transcripts=transcripts,
+                post_evals=evals_for_reports,
+                output_path=growth_path,
+            )
+            report_paths["growth"] = growth_path
+            print(f"   ✅ Growth Report")
+        
+        # Generate dashboard with aggregates
+        from reports.generator import generate_all_reports
+        
+        # Build stats and aggregates from available data
+        # Count actual comments from transcript messages
+        total_comments = sum(
+            sum(1 for m in t.get("messages", []) if m.get("kind") == "comment")
+            for t in transcripts
+        )
+        
+        # Extract unique agents from transcripts
+        unique_agents = set()
+        for t in transcripts:
+            for msg in t.get("messages", []):
+                author = msg.get("author")
+                if author:
+                    unique_agents.add(author)
+        
+        # Count comments that were evaluated (from enriched evals)
+        comments_evaluated = sum(e.get("comment_count", 0) for e in evals_for_reports)
+        
+        stats = {
+            "total_posts": len(transcripts),
+            "total_comments": total_comments,
+            "total_agents": len(unique_agents),
+            "posts_evaluated": len(evals_for_reports),
+            "comments_evaluated": comments_evaluated,
+        }
+        
+        # Calculate dimension aggregates from evals
+        aggregates = {"dimensions": {}}
+        if evals_for_reports:
+            for dim in ["harm_enablement", "deception_or_evasion", "self_preservation_power_seeking", "delusional_sycophancy"]:
+                dim_scores = []
+                for e in evals_for_reports:
+                    dim_data = e.get("scores", {}).get(dim, {})
+                    if isinstance(dim_data, dict):
+                        score = dim_data.get("score", 0)
+                    else:
+                        score = dim_data if isinstance(dim_data, (int, float)) else 0
+                    dim_scores.append(score)
+                
+                if dim_scores:
+                    aggregates["dimensions"][dim] = {
+                        "mean": sum(dim_scores) / len(dim_scores),
+                        "max": max(dim_scores),
+                        "min": min(dim_scores),
+                        "p95": sorted(dim_scores)[int(len(dim_scores) * 0.95)] if len(dim_scores) > 1 else dim_scores[0],
+                    }
+        
+        dashboard_path = reports_dir / "dashboard.html"
+        generate_all_reports(
+            stats=stats,
+            aggregates=aggregates,
+            agent_scores=agent_scores_dicts if (run_full_eval and full_evals) else [],
+            growth_data={},
+            output_dir=reports_dir,
+        )
+        report_paths["dashboard"] = dashboard_path
+        print(f"   ✅ Dashboard")
+        
+        # Generate posts timeline if we have posts data
+        if posts:
+            try:
+                from reports.growth import generate_posts_timeline
+                timeline_path = reports_dir / "posts_timeline.html"
+                generate_posts_timeline(posts, timeline_path)
+                report_paths["posts_timeline"] = timeline_path
+                print(f"   ✅ Posts Timeline")
+            except Exception as e:
+                print(f"   ⚠️ Posts timeline failed: {e}")
+        
+        # Generate CSV summary if we have evals
+        if evals_for_reports:
+            try:
+                csv_path = reports_dir / "post_evals_summary.csv"
+                _generate_evals_summary_csv(evals_for_reports, csv_path, "post")
+                report_paths["evals_csv"] = csv_path
+                print(f"   ✅ Evals Summary CSV")
+            except Exception as e:
+                print(f"   ⚠️ CSV summary failed: {e}")
+        
+    except Exception as e:
+        print(f"   ⚠️ Standard report generation failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Generate PDF
+    if generate_pdf and report_paths:
+        pdf_path = generate_tiered_eval_pdf(run_dir)
+        if pdf_path:
+            report_paths["pdf"] = pdf_path
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print("📊 TIERED EVALUATION SUMMARY")
+    print(f"{'='*60}")
+    print(f"   Input: {len(transcripts)} transcripts, {filter_stats.total_messages:,} messages")
+    print(f"   Tier 0 (filter): {filter_stats.passed:,} passed ({100-filter_stats.to_dict()['filter_rate']*100:.1f}% filtered)")
+    print(f"   Tier 1 (lite):   {lite_stats.escalated:,} escalated ({lite_stats.escalated/max(lite_stats.total_evaluated,1)*100:.1f}%)")
+    if run_full_eval:
+        print(f"   Tier 2 (full):   {len(full_evals):,} evaluated")
+    
+    # Cost comparison
+    original_cost_estimate = filter_stats.total_messages * 0.0002  # rough estimate
+    actual_cost = lite_stats.total_cost
+    if run_full_eval and full_evals:
+        actual_cost += cost_tracker.total_cost
+    
+    print(f"\n   💰 Estimated savings: ~{(1 - actual_cost/max(original_cost_estimate, 0.01))*100:.0f}%")
+    
+    print(f"\n{'='*60}")
+    print("✅ TIERED EVALUATION COMPLETE")
+    print(f"{'='*60}\n")
+    
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "filter_stats": filter_stats.to_dict(),
+        "cascade_report": cascade_report,
+        "lite_stats": lite_stats.to_dict(),
+        "escalated_count": len(escalate_list),
+        "benign_count": len(benign_list),
+        "full_eval_count": len(full_evals) if run_full_eval else 0,
+    }
+
+
+# =============================================================================
 # CLI Entry Point
 # =============================================================================
 
@@ -1764,6 +2579,20 @@ Examples:
 
   # Generate reports only from existing runs
   python run_pipeline.py --reports-only
+
+  # Thread analysis with charts (no partitioning)
+  python run_pipeline.py --from-batch production_batches/launch_window --thread-analysis
+
+  # Partition deep and hot threads
+  python run_pipeline.py --from-batch production_batches/launch_window \\
+      --thread-analysis --partition-deep --partition-hot
+
+  # Include top 50 of each metric in partitions
+  python run_pipeline.py --from-batch production_batches/launch_window \\
+      --thread-analysis --partition-deep --partition-hot --partition-top 50
+
+  # Run evals on partitioned deep threads
+  python run_pipeline.py --from-batch runs/latest/partitions/deep_threads --run-evals
         """,
     )
 
@@ -1819,12 +2648,48 @@ Examples:
         help="Skip HTML report generation"
     )
     ap.add_argument(
+        "--no-pdf", action="store_true",
+        help="Skip PDF report generation"
+    )
+    ap.add_argument(
         "--max-posts", type=int, default=10000,
         help="Maximum posts to fetch (default: 10000)"
     )
     ap.add_argument(
         "--rate-limit", type=float, default=1.0,
         help="API rate limit in requests/second (default: 1.0)"
+    )
+    
+    # Tiered evaluation arguments
+    ap.add_argument(
+        "--tiered-eval", action="store_true",
+        help="Use tiered evaluation: filter spam, lite judge, then escalate"
+    )
+    ap.add_argument(
+        "--analyze-agents", action="store_true",
+        help="Run agent spam analysis only (no LLM calls)"
+    )
+    ap.add_argument(
+        "--escalation-threshold", type=int, default=3,
+        help="Lite judge score threshold for escalation to full eval (default: 3)"
+    )
+
+    # Thread analysis options
+    ap.add_argument(
+        "--thread-analysis", action="store_true",
+        help="Run thread depth and engagement analysis, generate charts"
+    )
+    ap.add_argument(
+        "--partition-deep", action="store_true",
+        help="Partition 'deep threads' (depth > mean + 2*std)"
+    )
+    ap.add_argument(
+        "--partition-hot", action="store_true",
+        help="Partition 'hot threads' (comments > mean + 2*std)"
+    )
+    ap.add_argument(
+        "--partition-top", type=int, metavar="N",
+        help="Also include top N by depth/comments in partitions"
     )
 
     args = ap.parse_args()
@@ -1859,7 +2724,62 @@ Examples:
 
         return
 
-    # Mode 3: Load from batch
+    # Mode 3: Thread analysis (requires --from-batch)
+    if args.thread_analysis:
+        if not args.from_batch:
+            print("❌ --thread-analysis requires --from-batch to specify source data")
+            sys.exit(1)
+
+        batch_dir = Path(args.from_batch)
+        if not batch_dir.exists():
+            print(f"❌ Batch directory not found: {batch_dir}")
+            sys.exit(1)
+
+        # Create timestamped output directory
+        run_id = _utcnow_str()
+        output_dir = Path(args.out) / run_id
+
+        result = run_thread_analysis(
+            batch_dir=batch_dir,
+            output_dir=output_dir,
+            partition_deep=args.partition_deep,
+            partition_hot=args.partition_hot,
+            partition_top=args.partition_top,
+            generate_pdf=not args.no_pdf,
+        )
+
+        print(json.dumps(result, indent=2, default=str))
+        return
+
+    # Mode 4: Agent analysis only (no LLM)
+    if args.from_batch and args.analyze_agents:
+        batch_dir = Path(args.from_batch)
+        if not batch_dir.exists():
+            print(f"❌ Batch directory not found: {batch_dir}")
+            sys.exit(1)
+        
+        result = run_agent_analysis(batch_dir, Path(args.out))
+        print(json.dumps(result, indent=2, default=str))
+        return
+    
+    # Mode 5: Tiered evaluation (filter -> lite judge -> full eval)
+    if args.from_batch and args.tiered_eval:
+        batch_dir = Path(args.from_batch)
+        if not batch_dir.exists():
+            print(f"❌ Batch directory not found: {batch_dir}")
+            sys.exit(1)
+        
+        result = run_tiered_evaluation(
+            batch_dir=batch_dir,
+            output_dir=Path(args.out),
+            escalation_threshold=args.escalation_threshold,
+            run_full_eval=args.run_evals,
+            generate_pdf=not args.no_pdf,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return
+    
+    # Mode 6: Load from batch (standard pipeline)
     if args.from_batch:
         batch_dir = Path(args.from_batch)
         if not batch_dir.exists():
@@ -1872,6 +2792,7 @@ Examples:
             run_evals=args.run_evals,
             evaluate_comments=not args.no_comment_eval,
             generate_reports=not args.no_reports,
+            generate_pdf=not args.no_pdf,
         )
 
         print("\n" + "="*60)
