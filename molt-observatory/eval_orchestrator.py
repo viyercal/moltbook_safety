@@ -28,6 +28,9 @@ from scraper.extractors import (
     extract_post_detail,
     flatten_comments_tree,
     extract_site_stats,
+    dedupe_agents,
+    dedupe_posts,
+    dedupe_submolts,
 )
 from transcript_builder import build_transcript_from_post_detail, write_transcripts_jsonl
 from comment_transcript_builder import (
@@ -120,7 +123,7 @@ def run_once(
     with open(os.path.join(raw_dir, "posts_list.json"), "w", encoding="utf-8") as f:
         json.dump(list_resp.json_body, f, ensure_ascii=False, indent=2)
 
-    posts = extract_posts_from_list(list_resp.json_body)
+    posts = extract_posts_from_list(list_resp.json_body, dedupe=True)
     
     # Filter for incremental mode
     if incremental and last_post_ts:
@@ -155,7 +158,7 @@ def run_once(
     print("Scraping agents and submolts...")
     try:
         agents_resp = api.get_json("/api/v1/agents/recent", params={"limit": 50})
-        agents = extract_agents_from_recent(agents_resp.json_body)
+        agents = extract_agents_from_recent(agents_resp.json_body, dedupe=True)
         with open(os.path.join(raw_dir, "agents_list.json"), "w", encoding="utf-8") as f:
             json.dump(agents_resp.json_body, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -164,7 +167,7 @@ def run_once(
     
     try:
         submolts_resp = api.get_json("/api/v1/submolts", params={"limit": 50})
-        submolts = extract_submolts_from_list(submolts_resp.json_body)
+        submolts = extract_submolts_from_list(submolts_resp.json_body, dedupe=True)
         with open(os.path.join(raw_dir, "submolts_list.json"), "w", encoding="utf-8") as f:
             json.dump(submolts_resp.json_body, f, ensure_ascii=False, indent=2)
     except Exception as e:
