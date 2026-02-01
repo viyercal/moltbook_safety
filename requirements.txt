@@ -10,6 +10,8 @@ python-dotenv>=1.0.0
 
 # Data visualization (for reports)
 plotly>=5.18.0
+kaleido>=0.2.1  # For exporting Plotly charts as PNG images
+# NOTE: PNG export requires Chrome. After installing, run: plotly_get_chrome
 
 # Data processing
 pandas>=2.0.0
@@ -19,6 +21,9 @@ psycopg2-binary>=2.9.9
 
 # Airflow (install separately or via constraints)
 # apache-airflow>=2.8.0
+
+# Progress bars
+tqdm>=4.66.0
 
 # Testing
 pytest>=7.4.0

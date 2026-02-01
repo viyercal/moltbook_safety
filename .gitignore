@@ -18,6 +18,7 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+.cursorrules
 
 # OS
 .DS_Store
@@ -27,6 +28,13 @@ Thumbs.db
 #env
 .env
 
+# Integration test output
+molt-observatory/test_runs/
+
 # blogpost
 docs-site/*
 docs-site
+
+# results (runs, production batches)
+runs
+production_batches
