@@ -13,6 +13,11 @@ plotly>=5.18.0
 kaleido>=0.2.1  # For exporting Plotly charts as PNG images
 # NOTE: PNG export requires Chrome. After installing, run: plotly_get_chrome
 
+# PDF generation (uses Playwright for JS chart rendering)
+# playwright is used for both scraping and PDF export
+# Run `playwright install chromium` after pip install
+PyPDF2>=3.0.0  # For combining multiple PDFs into one report
+
 # Data processing
 pandas>=2.0.0
 
