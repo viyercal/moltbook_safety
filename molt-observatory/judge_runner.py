@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openrouter_client import OpenRouterClient
@@ -274,8 +275,10 @@ class LLMJudgeRunner:
         dimensions: Optional[List[Dict[str, str]]] = None,
     ):
         self.client = client or OpenRouterClient()
-        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
-        self.repair_model = os.environ.get("REPAIR_MODEL", "google/gemini-2.5-flash-lite")
+        self.model = model or os.environ.get(
+            "OPENROUTER_MODEL", "google/gemini-3-flash-preview")
+        self.repair_model = os.environ.get(
+            "REPAIR_MODEL", "google/gemini-2.5-flash-lite")
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
 
         # Retry controls
@@ -744,3 +747,291 @@ def run_comment_judges(
                 })
 
     return out
+
+
+# =============================================================================
+# Cost-Tracking Evaluation Functions
+# =============================================================================
+
+@dataclass
+class CostTracker:
+    """Tracks API usage and cost across evaluations."""
+    total_cost: float = 0.0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    eval_count: int = 0
+
+    def add(self, usage: Optional[Dict[str, Any]], cost: Optional[float]) -> None:
+        """Add usage from a single API call."""
+        self.eval_count += 1
+        if usage:
+            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+            self.total_completion_tokens += usage.get("completion_tokens", 0)
+        if cost:
+            self.total_cost += cost
+
+    def estimate_total(self, total_items: int) -> float:
+        """Estimate total cost based on current average."""
+        if self.eval_count == 0:
+            return 0.0
+        avg_cost = self.total_cost / self.eval_count
+        return avg_cost * total_items
+
+    def format_cost(self) -> str:
+        """Format cost for display."""
+        return f"${self.total_cost:.4f}"
+
+    def format_estimate(self, total_items: int) -> str:
+        """Format estimated total cost."""
+        estimate = self.estimate_total(total_items)
+        return f"${estimate:.4f}"
+
+
+class CostTrackingJudgeRunner(LLMJudgeRunner):
+    """LLM Judge that tracks usage and cost per call."""
+
+    def __init__(self, *args, cost_tracker: Optional[CostTracker] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cost_tracker = cost_tracker or CostTracker()
+
+    def _call_judge(self, transcript_text: str, extra_strict: bool, max_tokens: int) -> Tuple[Dict[str, Any], str]:
+        payload = {
+            "model": self.model,
+            "temperature": 0.0,
+            "messages": [
+                {"role": "system", "content": _judge_system_prompt(
+                    self.dimensions, extra_strict=extra_strict)},
+                {"role": "user", "content": transcript_text},
+            ],
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        resp = self.client.chat(payload)
+
+        # Track usage and cost
+        if resp.usage or resp.cost:
+            self.cost_tracker.add(resp.usage, resp.cost)
+
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(
+                f"OpenRouter error {resp.status_code}: {resp.text[:500]}")
+        resp_json = resp.json if isinstance(resp.json, dict) else {}
+        content = _extract_content(resp_json).strip()
+
+        if not content:
+            raw_text = (getattr(resp, "text", "") or "").strip()
+            return resp_json, raw_text
+
+        return resp_json, content
+
+
+class CostTrackingCommentJudgeRunner(CommentJudgeRunner):
+    """Comment Judge that tracks usage and cost per call."""
+
+    def __init__(self, *args, cost_tracker: Optional[CostTracker] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cost_tracker = cost_tracker or CostTracker()
+
+    def _call_comment_judge(
+        self,
+        transcript_text: str,
+        extra_strict: bool,
+        max_tokens: int
+    ) -> Tuple[Dict[str, Any], str]:
+        payload = {
+            "model": self.model,
+            "temperature": 0.0,
+            "messages": [
+                {"role": "system", "content": _comment_judge_system_prompt(
+                    self.dimensions, extra_strict=extra_strict)},
+                {"role": "user", "content": transcript_text},
+            ],
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        resp = self.client.chat(payload)
+
+        # Track usage and cost
+        if resp.usage or resp.cost:
+            self.cost_tracker.add(resp.usage, resp.cost)
+
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(
+                f"OpenRouter error {resp.status_code}: {resp.text[:500]}")
+        resp_json = resp.json if isinstance(resp.json, dict) else {}
+        content = _extract_content(resp_json).strip()
+
+        if not content:
+            raw_text = (getattr(resp, "text", "") or "").strip()
+            return resp_json, raw_text
+
+        return resp_json, content
+
+
+def run_judges_with_cost_tracking(
+    transcripts: List[Dict[str, Any]],
+    dimensions: Optional[List[Dict[str, str]]] = None,
+    judge_models: Optional[List[str]] = None,
+    client: Optional[OpenRouterClient] = None,
+    show_progress: bool = True,
+) -> Tuple[List[Dict[str, Any]], CostTracker]:
+    """
+    Run judges with tqdm progress bar and cost tracking.
+
+    Returns:
+        Tuple of (evaluation results, cost tracker)
+    """
+    from tqdm import tqdm
+
+    dims = dimensions or DEFAULT_DIMENSIONS
+    models = judge_models or [os.environ.get(
+        "OPENROUTER_MODEL", "google/gemini-3-flash-preview")]
+
+    cost_tracker = CostTracker()
+    out: List[Dict[str, Any]] = []
+    total_items = len(transcripts) * len(models)
+
+    for model in models:
+        runner = CostTrackingJudgeRunner(
+            client=client, model=model, dimensions=dims, cost_tracker=cost_tracker)
+
+        desc = f"Evaluating posts ({model.split('/')[-1]})"
+        iterator = tqdm(transcripts, desc=desc, disable=not show_progress)
+
+        for t in iterator:
+            try:
+                scored = runner.score_transcript(t)
+
+                result = scored.get("result", {}) if isinstance(
+                    scored, dict) else {}
+                scores = result.get("scores", {}) if isinstance(
+                    result, dict) else {}
+                notes = result.get("notes") if isinstance(
+                    result, dict) else None
+
+                out.append({
+                    "post_id": scored.get("post_id"),
+                    "transcript_id": scored.get("transcript_id"),
+                    "permalink": scored.get("permalink"),
+                    "model": scored.get("model"),
+                    "latency_ms": scored.get("latency_ms"),
+                    "finish_reason": scored.get("finish_reason"),
+                    "scores": scores,
+                    "notes": notes,
+                    "raw_result": result,
+                })
+
+                # Update progress bar with cost info
+                if show_progress:
+                    estimate = cost_tracker.estimate_total(total_items)
+                    iterator.set_postfix({
+                        "cost": f"${cost_tracker.total_cost:.4f}",
+                        "est": f"${estimate:.4f}",
+                        "tokens": f"{cost_tracker.total_prompt_tokens + cost_tracker.total_completion_tokens:,}",
+                    })
+
+            except Exception as e:
+                print(f"\nError evaluating post {t.get('post_id')}: {e}")
+                out.append({
+                    "post_id": t.get("post_id"),
+                    "transcript_id": t.get("transcript_id"),
+                    "permalink": t.get("permalink"),
+                    "model": model,
+                    "error": str(e),
+                    "scores": {},
+                })
+
+    return out, cost_tracker
+
+
+def run_comment_judges_with_cost_tracking(
+    comment_transcripts: List[Dict[str, Any]],
+    dimensions: Optional[List[Dict[str, str]]] = None,
+    judge_models: Optional[List[str]] = None,
+    client: Optional[OpenRouterClient] = None,
+    show_progress: bool = True,
+    cost_tracker: Optional[CostTracker] = None,
+) -> Tuple[List[Dict[str, Any]], CostTracker]:
+    """
+    Evaluate comment transcripts with tqdm progress bar and cost tracking.
+
+    Args:
+        comment_transcripts: List of comment transcript dicts
+        dimensions: Evaluation dimensions
+        judge_models: List of model strings
+        client: OpenRouter client instance
+        show_progress: Whether to show tqdm progress bar
+        cost_tracker: Optional existing cost tracker to continue accumulating
+
+    Returns:
+        Tuple of (evaluation results, cost tracker)
+    """
+    from tqdm import tqdm
+
+    dims = dimensions or DEFAULT_DIMENSIONS
+    models = judge_models or [os.environ.get(
+        "OPENROUTER_MODEL", "google/gemini-3-flash-preview")]
+
+    if cost_tracker is None:
+        cost_tracker = CostTracker()
+
+    out: List[Dict[str, Any]] = []
+    total_items = len(comment_transcripts) * len(models)
+
+    for model in models:
+        runner = CostTrackingCommentJudgeRunner(
+            client=client, model=model, dimensions=dims, cost_tracker=cost_tracker)
+
+        desc = f"Evaluating comments ({model.split('/')[-1]})"
+        iterator = tqdm(comment_transcripts, desc=desc,
+                        disable=not show_progress)
+
+        for t in iterator:
+            try:
+                scored = runner.score_comment_transcript(t)
+
+                result = scored.get("result", {}) if isinstance(
+                    scored, dict) else {}
+                scores = result.get("scores", {}) if isinstance(
+                    result, dict) else {}
+                notes = result.get("notes") if isinstance(
+                    result, dict) else None
+
+                out.append({
+                    "comment_id": scored.get("comment_id"),
+                    "post_id": scored.get("post_id"),
+                    "transcript_id": scored.get("transcript_id"),
+                    "permalink": scored.get("permalink"),
+                    "author": scored.get("author"),
+                    "model": scored.get("model"),
+                    "latency_ms": scored.get("latency_ms"),
+                    "finish_reason": scored.get("finish_reason"),
+                    "scores": scores,
+                    "notes": notes,
+                    "raw_result": result,
+                })
+
+                # Update progress bar with cost info
+                if show_progress:
+                    estimate = cost_tracker.estimate_total(
+                        cost_tracker.eval_count + (total_items - len(out)))
+                    iterator.set_postfix({
+                        "cost": f"${cost_tracker.total_cost:.4f}",
+                        "est": f"${estimate:.4f}",
+                        "tokens": f"{cost_tracker.total_prompt_tokens + cost_tracker.total_completion_tokens:,}",
+                    })
+
+            except Exception as e:
+                print(f"\nError evaluating comment {t.get('comment_id')}: {e}")
+                out.append({
+                    "comment_id": t.get("comment_id"),
+                    "post_id": t.get("post_id"),
+                    "transcript_id": t.get("transcript_id"),
+                    "permalink": t.get("permalink"),
+                    "author": t.get("target_comment", {}).get("author"),
+                    "model": model,
+                    "error": str(e),
+                    "scores": {},
+                })
+
+    return out, cost_tracker
