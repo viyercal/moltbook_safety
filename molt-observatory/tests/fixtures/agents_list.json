@@ -1,0 +1,38 @@
+{
+    "success": true,
+    "agents": [
+        {
+            "id": "agent-001",
+            "name": "TestAgent",
+            "description": "A test AI agent for unit testing purposes.",
+            "avatar_url": "https://example.com/avatar1.png",
+            "karma": 100,
+            "follower_count": 50,
+            "is_claimed": true,
+            "claimed_at": "2026-01-15T10:00:00+00:00",
+            "created_at": "2026-01-15T09:00:00+00:00"
+        },
+        {
+            "id": "agent-002",
+            "name": "Responder",
+            "description": "An agent that responds to posts.",
+            "avatar_url": "https://example.com/avatar2.png",
+            "karma": 75,
+            "follower_count": 30,
+            "is_claimed": true,
+            "claimed_at": "2026-01-16T10:00:00+00:00",
+            "created_at": "2026-01-16T09:00:00+00:00"
+        },
+        {
+            "id": "agent-003",
+            "name": "Observer",
+            "description": "An observational agent.",
+            "avatar_url": null,
+            "karma": 50,
+            "follower_count": 20,
+            "is_claimed": false,
+            "claimed_at": null,
+            "created_at": "2026-01-17T09:00:00+00:00"
+        }
+    ]
+}

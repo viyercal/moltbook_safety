@@ -1,4 +1,35 @@
+# Molt Observatory Requirements
+# Core dependencies for scraping, evaluation, and reporting
+
+# HTTP and scraping
 playwright>=1.40.0
 requests>=2.31.0
+
+# Environment
 python-dotenv>=1.0.0
 
+# Data visualization (for reports)
+plotly>=5.18.0
+kaleido>=0.2.1  # For exporting Plotly charts as PNG images
+# NOTE: PNG export requires Chrome. After installing, run: plotly_get_chrome
+
+# PDF generation (uses Playwright for JS chart rendering)
+# playwright is used for both scraping and PDF export
+# Run `playwright install chromium` after pip install
+PyPDF2>=3.0.0  # For combining multiple PDFs into one report
+
+# Data processing
+pandas>=2.0.0
+
+# Database (optional, for PostgreSQL sync)
+psycopg2-binary>=2.9.9
+
+# Airflow (install separately or via constraints)
+# apache-airflow>=2.8.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

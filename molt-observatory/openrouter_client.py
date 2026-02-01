@@ -13,6 +13,8 @@ class ORResponse:
     text: str
     json: Optional[Dict[str, Any]]
     elapsed_ms: int
+    usage: Optional[Dict[str, Any]] = None  # {prompt_tokens, completion_tokens, total_tokens}
+    cost: Optional[float] = None  # Cost in USD if provided by OpenRouter
 
 
 class OpenRouterClient:
@@ -76,7 +78,20 @@ class OpenRouterClient:
 
                 # Success
                 if 200 <= r.status_code < 300:
-                    return ORResponse(r.status_code, r.text, j, elapsed_ms)
+                    # Extract usage and cost from response
+                    usage = None
+                    cost = None
+                    if j:
+                        usage = j.get("usage")
+                        # OpenRouter sometimes includes cost in usage or at top level
+                        if usage and "cost" in usage:
+                            cost = usage.get("cost")
+                        elif "cost" in j:
+                            cost = j.get("cost")
+                        # Some providers return total_cost
+                        if cost is None and usage:
+                            cost = usage.get("total_cost")
+                    return ORResponse(r.status_code, r.text, j, elapsed_ms, usage, cost)
 
                 # Retry on transient
                 if r.status_code in (408, 429, 502, 503):
@@ -85,7 +100,7 @@ class OpenRouterClient:
                     continue
 
                 # Non-retryable
-                return ORResponse(r.status_code, r.text, j, elapsed_ms)
+                return ORResponse(r.status_code, r.text, j, elapsed_ms, None, None)
 
             except Exception as e:
                 last_exc = e

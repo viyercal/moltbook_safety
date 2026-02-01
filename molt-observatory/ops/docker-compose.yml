@@ -1,2 +1,125 @@
-# Docker Compose configuration for molt-observatory services
+# Docker Compose configuration for Molt Observatory services
+# 
+# Usage:
+#   docker-compose up -d
+#
+# Services:
+#   - airflow-webserver: Airflow UI at http://localhost:8080
+#   - airflow-scheduler: DAG scheduler
+#   - postgres: Airflow metadata database
+#   - molt-worker: Optional standalone worker for manual runs
 
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: ops/Dockerfile.airflow
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Molt Observatory settings
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3-flash-preview}
+    JUDGE_MAX_ATTEMPTS: ${JUDGE_MAX_ATTEMPTS:-3}
+    JUDGE_MAX_TOKENS: ${JUDGE_MAX_TOKENS:-1800}
+  volumes:
+    - ../:/opt/molt-observatory
+    - airflow-logs:/opt/airflow/logs
+    - runs-data:/opt/molt-observatory/runs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Optional: Standalone worker for manual runs
+  molt-worker:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.worker
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3-flash-preview}
+    volumes:
+      - ../:/app
+      - runs-data:/app/runs
+    profiles:
+      - worker  # Only start with: docker-compose --profile worker up molt-worker
+
+volumes:
+  postgres-data:
+  airflow-logs:
+  runs-data:
+
+networks:
+  default:
+    name: molt-observatory-network

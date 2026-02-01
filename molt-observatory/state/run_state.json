@@ -1,0 +1,36 @@
+{
+    "last_run_id": null,
+    "last_run_at": null,
+    "cursors": {
+        "posts": {
+            "offset": 0,
+            "last_created_at": null,
+            "last_id": null,
+            "total_fetched": 0
+        },
+        "agents": {
+            "offset": 0,
+            "last_created_at": null,
+            "last_id": null,
+            "total_fetched": 0
+        },
+        "submolts": {
+            "offset": 0,
+            "last_created_at": null,
+            "last_id": null,
+            "total_fetched": 0
+        },
+        "comments": {
+            "offset": 0,
+            "last_created_at": null,
+            "last_id": null,
+            "total_fetched": 0
+        }
+    },
+    "totals": {
+        "posts_seen": 0,
+        "agents_seen": 0,
+        "submolts_seen": 0,
+        "comments_seen": 0
+    }
+}
