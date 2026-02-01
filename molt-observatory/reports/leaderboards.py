@@ -329,12 +329,19 @@ def generate_agent_leaderboard(
     
     rows = []
     for i, agent in enumerate(sorted_agents[:25]):
+        agent_handle = agent.get("agent_handle", "Unknown")
+        agent_link = f'<a href="https://www.moltbook.com/agent/{agent_handle}" target="_blank" class="agent-link">@{agent_handle}</a>'
+        
+        posts_count = agent.get("posts_evaluated", 0)
+        comments_count = agent.get("comments_evaluated", 0)
+        
         rows.append(f'''
             <tr>
                 <td>{i + 1}</td>
-                <td>{agent.get("agent_handle", "Unknown")}</td>
+                <td>{agent_link}</td>
                 <td>{_score_badge(agent.get("overall_mean_score", 0))}</td>
-                <td>{agent.get("posts_evaluated", 0)}</td>
+                <td>{posts_count}</td>
+                <td>{comments_count}</td>
                 <td>{"⚠️" if agent.get("has_high_harm_enablement") else "✓"}</td>
             </tr>
         ''')
@@ -348,7 +355,8 @@ def generate_agent_leaderboard(
                         <th>#</th>
                         <th>Agent</th>
                         <th>Mean Score</th>
-                        <th>Posts Evaluated</th>
+                        <th>Posts</th>
+                        <th>Comments</th>
                         <th>Risk</th>
                     </tr>
                 </thead>
@@ -399,6 +407,7 @@ def generate_dimension_leaderboard(
     for i, post in enumerate(sorted_posts[:25]):
         title = post.get("title", "Untitled") or "Untitled"
         permalink = post.get("permalink", "")
+        author = post.get("author", "Unknown") or "Unknown"
         truncated_title = title[:40] + "..." if len(title) > 40 else title
         
         # Make title a clickable hyperlink if permalink exists
@@ -407,13 +416,20 @@ def generate_dimension_leaderboard(
         else:
             title_cell = truncated_title
         
+        # Make author a clickable hyperlink to their profile
+        author_cell = f'<a href="https://www.moltbook.com/agent/{author}" target="_blank" class="author-link">@{author}</a>'
+        
+        # Show comment count if available
+        comment_count = post.get("comment_count", 0)
+        comment_cell = f'{comment_count} 💬' if comment_count else "-"
+        
         rows.append(f'''
             <tr>
                 <td>{i + 1}</td>
                 <td>{title_cell}</td>
                 <td>{_score_badge(post.get("score", 0))}</td>
-                <td>{post.get("confidence", 0):.2f}</td>
-                <td>{post.get("author", "Unknown")}</td>
+                <td>{author_cell}</td>
+                <td>{comment_cell}</td>
             </tr>
         ''')
     
@@ -426,8 +442,8 @@ def generate_dimension_leaderboard(
                         <th>#</th>
                         <th>Title</th>
                         <th>Score</th>
-                        <th>Confidence</th>
                         <th>Author</th>
+                        <th>Comments</th>
                     </tr>
                 </thead>
                 <tbody>
