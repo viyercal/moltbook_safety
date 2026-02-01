@@ -3,11 +3,56 @@
 Extractors for transforming Moltbook API responses into canonical formats.
 """
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from datetime import datetime, timezone
 
 
-def extract_agents_from_recent(payload: Any) -> List[Dict[str, Any]]:
+# =============================================================================
+# Deduplication Helpers
+# =============================================================================
+
+def dedupe_by_key(items: List[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
+    """
+    Deduplicate a list of dicts by a specific key.
+    Keeps the first occurrence of each unique key value.
+    """
+    seen: Set[Any] = set()
+    result: List[Dict[str, Any]] = []
+
+    for item in items:
+        key_value = item.get(key)
+        if key_value is not None and key_value not in seen:
+            seen.add(key_value)
+            result.append(item)
+
+    return result
+
+
+def dedupe_agents(agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate agents by agent_external_id."""
+    return dedupe_by_key(agents, "agent_external_id")
+
+
+def dedupe_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate posts by post_external_id."""
+    return dedupe_by_key(posts, "post_external_id")
+
+
+def dedupe_submolts(submolts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate submolts by submolt_external_id."""
+    return dedupe_by_key(submolts, "submolt_external_id")
+
+
+def dedupe_comments(comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate comments by comment_external_id."""
+    return dedupe_by_key(comments, "comment_external_id")
+
+
+# =============================================================================
+# Agent Extractors
+# =============================================================================
+
+def extract_agents_from_recent(payload: Any, dedupe: bool = True) -> List[Dict[str, Any]]:
     """
     Moltbook /api/v1/agents/recent returns:
       { "success": true, "agents": [ { id, name, description, avatar_url, ... } ] }
@@ -26,6 +71,10 @@ def extract_agents_from_recent(payload: Any) -> List[Dict[str, Any]]:
         "created_at": str|None,
         "profile_url": str|None,
       }
+
+    Args:
+        payload: Raw API response
+        dedupe: If True, deduplicate by agent_external_id (default: True)
     """
     agents = []
     if isinstance(payload, dict):
@@ -58,13 +107,21 @@ def extract_agents_from_recent(payload: Any) -> List[Dict[str, Any]]:
             "profile_url": f"https://www.moltbook.com/u/{name}",
         })
 
+    # Deduplicate by agent_external_id
+    if dedupe:
+        out = dedupe_agents(out)
+
     return out
 
 
-def extract_posts_from_list(payload: Any) -> List[Dict[str, Any]]:
+def extract_posts_from_list(payload: Any, dedupe: bool = True) -> List[Dict[str, Any]]:
     """
     /api/v1/posts returns:
       {"success": true, "posts": [ {id, title, content, url, upvotes, downvotes, comment_count, created_at, author, submolt}, ... ]}
+
+    Args:
+        payload: Raw API response
+        dedupe: If True, deduplicate by post_external_id (default: True)
     """
     posts = []
     if isinstance(payload, dict):
@@ -108,6 +165,10 @@ def extract_posts_from_list(payload: Any) -> List[Dict[str, Any]]:
             "submolt_display_name": submolt.get("display_name"),
             "permalink": f"https://www.moltbook.com/post/{post_id}",
         })
+
+    # Deduplicate by post_external_id
+    if dedupe:
+        out = dedupe_posts(out)
 
     return out
 
@@ -214,7 +275,7 @@ def flatten_comments_tree(comments: Any, post_external_id: str) -> List[Dict[str
     return out
 
 
-def extract_submolts_from_list(payload: Any) -> List[Dict[str, Any]]:
+def extract_submolts_from_list(payload: Any, dedupe: bool = True) -> List[Dict[str, Any]]:
     """
     /api/v1/submolts returns:
       {"success": true, "submolts": [{id, name, display_name, description, subscriber_count, ...}]}
@@ -236,6 +297,10 @@ def extract_submolts_from_list(payload: Any) -> List[Dict[str, Any]]:
         "banner_url": str|None,
         "url": str,
       }
+
+    Args:
+        payload: Raw API response
+        dedupe: If True, deduplicate by submolt_external_id (default: True)
     """
     submolts = []
     if isinstance(payload, dict):
@@ -272,6 +337,10 @@ def extract_submolts_from_list(payload: Any) -> List[Dict[str, Any]]:
             "banner_url": s.get("banner_url"),
             "url": f"https://www.moltbook.com/m/{name}",
         })
+
+    # Deduplicate by submolt_external_id
+    if dedupe:
+        out = dedupe_submolts(out)
 
     return out
 

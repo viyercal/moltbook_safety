@@ -2,14 +2,24 @@
 """
 Moltbook API client with pagination, rate limiting, and comprehensive entity fetching.
 API docs: https://www.moltbook.com/skill.md
+
+Authentication:
+    Set MOLTBOOK_API_KEY in your .env file to authenticate requests.
+    All requests will include Authorization: Bearer {API_KEY} header.
 """
 import json
+import os
 import time
 import hashlib
 import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
@@ -59,18 +69,34 @@ def _parse_json_lenient(text: str) -> Any:
 
 
 class MoltbookAPI:
+    """
+    Moltbook API client with authentication, rate limiting, and pagination.
+
+    Requires MOLTBOOK_API_KEY environment variable for authenticated requests.
+    Without an API key, some endpoints may return limited data (e.g., author: null).
+    """
+
     def __init__(self, base_url: str = "https://www.moltbook.com", user_agent: str = None,
-                 rate_per_sec: float = 0.5, burst: int = 3):
+                 rate_per_sec: float = 0.5, burst: int = 3, api_key: str = None):
         self.base = base_url.rstrip("/")
         self.sess = requests.Session()
+
+        # Set default headers
         self.sess.headers.update({
             "User-Agent": user_agent or "molt-observatory-bot/0.1 (contact: security-research; purpose: public-safety-auditing)",
             "Accept": "application/json",
         })
+
+        # Add Authorization header if API key is available
+        # Priority: explicit api_key param > environment variable
+        self.api_key = api_key or os.environ.get("MOLTBOOK_API_KEY")
+        if self.api_key:
+            self.sess.headers["Authorization"] = f"Bearer {self.api_key}"
+
         # ~1 req per 2s, burst 3 by default
         self.rl = TokenBucket(rate_per_sec=rate_per_sec, burst=burst)
 
-    def get_json(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 20) -> ApiResponse:
+    def get_json(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 160) -> ApiResponse:
         url = f"{self.base}{path}"
         self.rl.take(1)
 
